@@ -319,6 +319,25 @@
       </executions>
       </plugin>
       <plugin>
+        <groupId>org.pitest</groupId>
+        <artifactId>pitest-maven</artifactId>
+        <version>1.22.0</version> <configuration>
+        <targetClasses>
+          <param>org.apache.bookkeeper.bookie.BookieStateManager</param>
+        </targetClasses>
+
+        <targetTests>
+          <param>org.apache.bookkeeper.bookie.BookieStateManagerTest</param>
+        </targetTests>
+
+        <outputFormats>
+          <param>HTML</param>
+        </outputFormats>
+
+        <timestampedReports>false</timestampedReports>
+      </configuration>
+      </plugin>
+      <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-javadoc-plugin</artifactId>
         <configuration>

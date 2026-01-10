@@ -7,22 +7,19 @@ import org.apache.bookkeeper.discover.RegistrationManager;
 import org.apache.bookkeeper.stats.Gauge;
 import org.apache.bookkeeper.stats.NullStatsLogger;
 import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.tools.cli.commands.bookie.SanityTestCommand;
 import org.junit.*;
 import org.junit.rules.TemporaryFolder;
 import org.mockito.ArgumentCaptor;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
+import java.util.concurrent.*;
 
 import static java.lang.Boolean.TRUE;
-import static org.apache.bookkeeper.bookie.BookKeeperServerStats.*;
 import static org.junit.Assert.*;
 import static org.mockito.Mockito.*;
 
@@ -44,6 +41,28 @@ public class BookieStateManagerTest {
     private List<File> file;
 
 
+    // metodo usato dal test doTransitionToWritableModeTest
+    private String leggiDaRiga(String pathFile) throws IOException {
+        FileReader fileReader = new FileReader(pathFile);
+        // inizializzo la stringa come vuota
+        String riga="";
+        try(BufferedReader br=new BufferedReader(fileReader)){
+            // ai fini del test ci sarà solo una riga nel file e questa avrà 3 elementi separati da una virgola, a me interessa il secondo di questi
+            riga = br.readLine();
+            // Divide la riga in un array usando la virgola come separatore
+            String[] elementi = riga.split(",");
+
+            // Controllo che la riga abbia effettivamente almeno 2 elementi
+            if (elementi.length >= 2) {
+                riga = elementi[1];
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        fileReader.close();
+        return riga;
+    }
+
     @Before
     public void setUp() throws Exception {
         // setup comune a tutti i test
@@ -64,7 +83,7 @@ public class BookieStateManagerTest {
         dummyServiceInfoSupplier = () -> null;
         //spazio su disco disponibii
         when(mockLedgerDirsManager.getWritableLedgerDirs()).thenReturn(writableDirs);
-        bookieStateManager = new BookieStateManager(mockConf, dummyStatsLogger, mockRm,
+        bookieStateManager =new BookieStateManager(mockConf, dummyStatsLogger, mockRm,
                 mockLedgerDirsManager, dummyServiceInfoSupplier);
     }
 
@@ -79,9 +98,9 @@ public class BookieStateManagerTest {
      * isReadOnly() -> False
      * WRITABLE
      */
-    // risultato ottenuto : ok il test passa
+    // risultato ottenuto: ok il test passa
     @Test
-    public void HappyPathTest() throws IOException {
+    public void HappyPathTest(){
         bookieStateManager.initState();
         // verifica che il bookie è running
         assertTrue("Il Bookie state manager dovrebbe essere nello stato running! Risposta assert:", bookieStateManager.isRunning());
@@ -309,8 +328,6 @@ public class BookieStateManagerTest {
      * - Stato Iniziale: ReadOnly
      * - Oracolo:
      * isReadOnly() -> True
-     * - Risultato: Il test fallisce, c'e' un incoerenza tra documentazione e metodi effettivi. Il transitionToReadOnlyMode() secondo la documentazione deve ricevere un booleano che indica se il
-     * passaggio manuale deve essereforzato o meno. Invece il metodo non riceve nulla. Quindi non riesco a simulare il passaggio automatico a RO
      */
     @Test
     @Ignore("BUG: nonostante siamo in zone isteresi, i dischi sono pieni, si passa a comunque a Writable. Stesso problema del test precedente")
@@ -359,7 +376,6 @@ public class BookieStateManagerTest {
 
     @Test
     public void StartWithForceReadOnlyConfigTest() throws IOException {
-        // dall' analisi white box, forceToReadOnly deve essere chiamato PRIMA dell initState per forzare lo stato
         bookieStateManager.forceToReadOnly();
         bookieStateManager.initState();
 
@@ -399,8 +415,6 @@ public class BookieStateManagerTest {
         // VERIFICA: Non deve essere possibile uscire dallo stato di shutdown
         assertTrue("Il Bookie deve rimanere in shutdown anche dopo richiesta di Writable",
                 bookieStateManager.isShuttingDown());
-        // A seconda dell'implementazione interna, isRunning potrebbe diventare false
-        // ma isShuttingDown deve rimanere true.
     }
 
     /**
@@ -416,11 +430,12 @@ public class BookieStateManagerTest {
         bookieStateManager.initState();
 
         // Di default, con dischi sani, dovremmo accettare tutto
-        assertTrue("Dovrebbe accettare scritture standard", !bookieStateManager.isReadOnly());
+        assertFalse("Dovrebbe accettare scritture standard", bookieStateManager.isReadOnly());
         assertTrue("Dovrebbe accettare HP writes default", bookieStateManager.isAvailableForHighPriorityWrites());
 
         // Disabilitiamo esplicitamente le scritture HP (es. manutenzione o logica di throttling)
         bookieStateManager.setHighPriorityWritesAvailability(false);
+
 
         // Verifica
         assertFalse("Le scritture HP dovrebbero essere disabilitate",
@@ -487,6 +502,8 @@ public class BookieStateManagerTest {
 
         // Verifica opzionale: chiamare close() non deve lanciare eccezioni in questo stato
         bookieStateManager.close();
+        assertFalse("il bookie non dovrebbe più essere in stato running",bookieStateManager.isRunning());
+        assertTrue("lo state service deve essere passato in shutdown",bookieStateManager.stateService.isShutdown());
     }
 
     /**
@@ -505,8 +522,7 @@ public class BookieStateManagerTest {
 
         // Simulo la registrazione avvenuta
         // Nota: registerBookie è un metodo async che ritorna un Future
-        // bookieStateManager.registerBookie(true);
-
+        bookieStateManager.registerBookie(true);
         // Azione: Forzo lo stato a non registrato
         bookieStateManager.forceToUnregistered();
 
@@ -529,25 +545,112 @@ public class BookieStateManagerTest {
 
 
     @Test
-    public void doTransitionToWritableModeTest() throws IOException, BookieException {
+    public void doTransitionToWritableModeTest() throws IOException, BookieException, ExecutionException, InterruptedException {
         lenient().when(mockConf.isPersistBookieStatusEnabled()).thenReturn(true);
         List<File> tempDirs = new ArrayList<>();
         tempDirs.add(tempFolder.newFolder("writable-mode-test"));
         lenient().when(mockLedgerDirsManager.getAllLedgerDirs()).thenReturn(tempDirs);
+        //ho quindi creato un directory temporanea valida e ho impostato il mock affinché quando il costruttore assegna un valore alla status dir, questo valore si proprio tempDirs
         BookieStateManager bookieStateManager= new BookieStateManager(mockConf, dummyStatsLogger, mockRm,
                 mockLedgerDirsManager, dummyServiceInfoSupplier);
         bookieStateManager.initState();
         bookieStateManager.doTransitionToReadOnlyMode();
         assertTrue("Il Bookie dovrebbe essere in stato read-only", bookieStateManager.isReadOnlyModeEnabled());
-        bookieStateManager.doTransitionToWritableMode();
+        //chiamando la transitionToWritableMode viene restituito un oggetto Future e non un null
+        clearInvocations(mockConf);
+        Future<Void> f=bookieStateManager.transitionToWritableMode();
+        assertNotEquals(f, null);
+        // aspetto che il metodo doTransitionToWritableMode venga eseguito
+        f.get();
+        // a questo punto sono writable
         assertFalse("Il Bookie dovrebbe essere in stato writable", bookieStateManager.isReadOnly());
+        //verifico che quando passo da RO a writable il registerBookie sia chiamato con isReadOnly pari a false
+        verify(mockRm,times(1)).registerBookie(any(),eq(false),any());
+        //verifico che quando passo da RO a writable lo stato RO sia passato a clear
+        verify(mockRm,times(1)).unregisterBookie(any(),eq(true));
+
+        //verifico che nella status dir è stato scritto: READ_WRITE presente come enum in BookieStatus
+
+        //prendo il path al file "/BOOKIE_STATUS per arrivare al file di scrittura"
+        String pathFile= String.valueOf(tempDirs.get(0)+ "/BOOKIE_STATUS");
+        // assegno a "riga" il valore del 2 elemento (che indica lo stato)
+        String riga=leggiDaRiga(pathFile);
+        //verifico che il cambiamento di stato sia stato comunicato alla status dir
+        assertEquals("READ_WRITE",riga);
+        // per aumentare la coverage ripasso allo stato writable da writable che sono già
+        clearInvocations(mockRm);
+        // ipotizzo si passi di nuovo nello stato writable quando già siamo writable e quindi nulla deve accadere
+        bookieStateManager.doTransitionToWritableMode();
+        //aggiungo per verififcare che il siamo entrati nel secondo if del doTransition ( se entriamo in quello non chiamiamo mai registerBookie)
+        verify(mockRm, times(0)).registerBookie(any(), anyBoolean(), any());
+
+        // ora testo che l exceptio venga chiamata quando passo a writable da read only
+
+        //sono read Only
+        bookieStateManager.doTransitionToReadOnlyMode();
+        doThrow(new BookieException.MetadataStoreException("Simulated Error")).when(mockRm).registerBookie(isNotNull(), eq(false), any());
+        //provo a tornare writable
+        clearInvocations(mockRm);
+        bookieStateManager.doTransitionToWritableMode();
+        verify(mockRm,times(1)).registerBookie(isNotNull(), eq(false), any());
+
 
     }
 
     @Test
+    public void doTransitionToReadOnlyModeTest() throws IOException, BookieException {
+        lenient().when(mockConf.isPersistBookieStatusEnabled()).thenReturn(true);
+        List<File> tempDirs = new ArrayList<>();
+        tempDirs.add(tempFolder.newFolder("writable-mode-test"));
+        lenient().when(mockLedgerDirsManager.getAllLedgerDirs()).thenReturn(tempDirs);
+        //ho quindi creato un directory temporanea valida e ho impostato il mock affinché quando il costruttore assegna un valore alla status dir, questo valore si proprio tempDirs
+        BookieStateManager bookieStateManager= new BookieStateManager(mockConf, dummyStatsLogger, mockRm,
+                mockLedgerDirsManager, dummyServiceInfoSupplier);
+        bookieStateManager.doTransitionToReadOnlyMode();
+        String pathFile= String.valueOf(tempDirs.get(0)+ "/BOOKIE_STATUS");
+        // assegno a "riga" il valore del 2 elemento (che indica lo stato)
+        String riga=leggiDaRiga(pathFile);
+        //verifico che il cambiamento di stato sia stato comunicato alla status dir
+        assertEquals("READ_ONLY",riga);
+        verify(mockRm,times(1)).registerBookie(isNotNull(),eq(true),any());
+        //mi assicuro che non cambi nulla quando da readOnly torno a readOnly
+        clearInvocations(mockRm);
+        bookieStateManager.doTransitionToReadOnlyMode();
+        // avendo resettato il mockRm e essendo passando da RO a RO la chiamata registerBookie non dovrebbe essere avvenuta
+        verify(mockRm,times(0)).registerBookie(isNotNull(),eq(true),any());
+
+        // adesso verifico cosa succede quando la moda RO non è abilitata
+
+        //passo in writable mode
+        bookieStateManager.doTransitionToWritableMode();
+        //ora ripasso a RO ma disabilito la ReadOnlyModeEnabled
+        when(mockConf.isReadOnlyModeEnabled()).thenReturn(false);
+        StateManager.ShutdownHandler mockShutdownHandler = mock(StateManager.ShutdownHandler.class);
+        bookieStateManager.setShutdownHandler(mockShutdownHandler);
+        bookieStateManager.doTransitionToReadOnlyMode();
+        verify(mockShutdownHandler,times(1)).shutdown(ExitCode.BOOKIE_EXCEPTION);
+
+        //ora provo a far fallire la registrazione quando torno da Writable a RO
+
+        //setto la ReadOnlyModeEnabled a True
+        when(mockConf.isReadOnlyModeEnabled()).thenReturn(true);
+        //passo a writable
+        bookieStateManager.doTransitionToWritableMode();
+        //provo a tornare a read ma faccio in modo che la registrazione non abbia successo
+        doThrow(new BookieException.MetadataStoreException("Simulated Error")).when(mockRm).registerBookie(any(), eq(true), any());
+        clearInvocations(mockShutdownHandler);
+        bookieStateManager.doTransitionToReadOnlyMode();
+        verify(mockShutdownHandler,times(1)).shutdown(ExitCode.BOOKIE_EXCEPTION);
+    }
+
+
+    @Test
     public void ForceReadOnlyTest(){
+        //comportamento default
+        assertFalse("Il Bookie non dovrebbe essere in stato Force read-only di default", bookieStateManager.isForceReadOnly());
         bookieStateManager.forceToReadOnly();
-        assertTrue("Il Bookie dovrebbe essere in stato read-only", bookieStateManager.isForceReadOnly());
+        assertTrue("Il Bookie dovrebbe essere in stato Force read-only", bookieStateManager.isForceReadOnly());
+
     }
 
     /**
@@ -568,16 +671,13 @@ public class BookieStateManagerTest {
 
         // Invocazione del costruttore target
         BookieStateManager simplifiedManager = new BookieStateManager(mockConf, mockRm);
-
         // Asserzioni base per verificare la corretta istanziazione
         assertNotNull("L'istanza non deve essere null", simplifiedManager);
         assertFalse("Il manager appena creato non dovrebbe essere running", simplifiedManager.isRunning());
-
         // Verifica che il registration manager passato sia stato effettivamente usato (o almeno assegnato)
         // Poiché il campo 'rm' è private, usiamo un metodo indiretto o reflection,
         // ma qui possiamo verificare se registerBookie usa il nostro mockRm.
         simplifiedManager.initState(); // Necessario per attivare l'executor interno se serve
-
         // Cleanup
         simplifiedManager.close();
     }
@@ -602,19 +702,37 @@ public class BookieStateManagerTest {
         assertTrue("Dovrebbe essere stato riabilitato", bookieStateManager.isAvailableForHighPriorityWrites());
     }
 
-    /** Verifica il  getter dello stato di registrazione. */
+    /** Verifica del getter e setter dello stato di registrazione. */
     @Test
-    public void isRegisteredTest() throws IOException {
-        bookieStateManager.initState(); // Simulo che sia registrato inizialmente (setup di default) // Nota: rmRegistered è un AtomicBoolean settato a true/false in doRegisterBookie
+    public void isRegisteredTest() throws IOException, BookieException {
+        //di default non siamo registrati
+        assertFalse("Dovrebbe ritornare false ", bookieStateManager.isRegistered());
+        // Simuliamo una registrazione
+        // doRegisterBookie setta rmRegistered a true
+        bookieStateManager.doRegisterBookie();
+        // verifico che non venga passato null come bookieId (aggiunta a seguito di mutante)
+        verify(mockRm).registerBookie(isNotNull(),anyBoolean(),any());
+        assertTrue("Dovrebbe ritornare true ", bookieStateManager.isRegistered());
 
-        // Per testarlo bene, forziamo lo stato unregistered
+        //verifico che nel mezzo isRegisterd sia settato a false
+        doAnswer(invocation -> {
+            // ... NOI controlliamo lo stato del bookie IN QUEL PRECISO MOMENTO.
+            // Se la riga 328 (set(false)) esiste, qui isRegistered() deve dare FALSE.
+            // Se il mutante ha cancellato la riga 328, qui isRegistered() darà ancora TRUE.
+            boolean isReg = bookieStateManager.isRegistered();
+
+            assertFalse("BUG FOUND: Il bookie dovrebbe essere 'unregistered' durante il tentativo di registrazione!", isReg);
+
+            return null;
+        }).when(mockRm).registerBookie(any(), anyBoolean(), any());
+
+        // Richiamo la registrazione, questa chiamata attiva l answer di sopra
+        bookieStateManager.doRegisterBookie();
+        //verifico ora che venag fatta la unregistration
         bookieStateManager.forceToUnregistered();
+        //ora rmRegistered deve essere false
         assertFalse("Dovrebbe ritornare false ", bookieStateManager.isRegistered());
 
-        // Simuliamo una registrazione (necessita che il mockRm non lanci eccezioni)
-        // Nota: Poiché doRegisterBookie setta rmRegistered a true, usiamo quello
-        bookieStateManager.doRegisterBookie();
-        assertTrue("Dovrebbe ritornare true ", bookieStateManager.isRegistered());
     }
 
     /** * Obiettivo: Verificare che se throwException è true
@@ -783,16 +901,13 @@ public class BookieStateManagerTest {
         // 2. Costruzione della nuova istanza specifica per questo test
         bookieStateManager = new BookieStateManager(mockConf, dummyStatsLogger, mockRm,
                 mockLedgerDirsManager, dummyServiceInfoSupplier);
-
         // 3. Verifica che il listener sia stato aggiunto e catturalo
         // Ora Mockito ne vedrà solo 1 (quella appena fatta sopra)
         verify(mockRm).addRegistrationListener(listenerCaptor.capture());
 
         RegistrationManager.RegistrationListener capturedListener = listenerCaptor.getValue();
-
         // Puliamo di nuovo per sicurezza prima di verificare l'effetto del trigger
         clearInvocations(mockRm);
-
         // 4. Esecuzione manuale del listener
         // Simula l'evento di Zookeeper che dice "la registrazione è scaduta"
         capturedListener.onRegistrationExpired();
@@ -802,6 +917,196 @@ public class BookieStateManagerTest {
         verify(mockRm, timeout(1000).times(1)).registerBookie(any(), anyBoolean(), any());
     }
 
+
+    //aggiunto per coprire il caso false
+    @Test
+    public void ReadOnlyModeEnabledTest() throws IOException {
+        //default
+        assertTrue(bookieStateManager.isReadOnlyModeEnabled());
+        when(mockConf.isReadOnlyModeEnabled()).thenReturn(false);
+        assertFalse(bookieStateManager.isReadOnlyModeEnabled());
+    }
+
+    /* Aggiunto per coprire i mutanti riga 318, mi assicuro che l operazione di or vada a buon fine e non venga cambiata in and
+    analizzo il caso in cui ForceReadOnly è true e lo stato del bookie è writable (false). true || false = true.
+    Se il mutante cambia || in &&, il risultato sarebbe false.
+     */
+    @Test
+    public void DoRegisterBookieOrLogic_ForceTrue_StatusFalse_Test() throws Exception {
+        // di default isInReadOnlyMode vale false (dischi sani)
+        bookieStateManager.initState();
+        bookieStateManager.forceToReadOnly();
+
+       //chiamo la registrazione
+        bookieStateManager.doRegisterBookie();
+
+        // Mi assicuro che al RegistrationManager sia arrivato 'true'
+        verify(mockRm, times(1)).registerBookie(isNotNull(), eq(true), any());
+
+    }
+
+    // Setup opposto: Force=FALSE, Status=READONLY (True)
+    // Caso: false || true = true.
+    @Test
+    public void DoRegisterBookieOrLogic_ForceFalse_StatusTrue_Test() throws Exception {
+
+        // Creiamo una situazione dove force è false (default) ma il bookieStatus è RO
+        // Usiamo transitionToReadOnlyMode che setta lo stato interno
+        bookieStateManager.initState();
+        //setto lo stato interno a RO (simulo dischi pieni)
+        bookieStateManager.transitionToReadOnlyMode().get();
+
+        /* Resetto il mock poichè anche la transitionToReadOnly chiamo il doRegisterBookie (riga 400)
+        lo faccio semplicemnte perche nel verify di sotto voglio contare solo la chiamata doRegister, se non volessi resettarlo
+        dovrei mettere 2 in times
+         */
+        clearInvocations(mockRm);
+
+        // Chiamiamo doRegisterBookie() che internamente valuta l'OR
+        bookieStateManager.doRegisterBookie();
+
+        // 2. Verifica: deve passare true
+        verify(mockRm, times(1)).registerBookie(any(), eq(true), any());
+    }
+
+    // Parte generata dal LLM per avere coverage nella lambda che partiva dopo 60 secondi
+    // ------------------------------------------------------------------------
+    // MUTATION TESTING: Sanity Check Scheduled Task
+    // ------------------------------------------------------------------------
+
+    /**
+     * Helper method per estrarre ed eseguire il task schedulato (la lambda a riga 176).
+     * Questo ci permette di evitare Thread.sleep() e rende il test deterministico.
+     */
+    private void triggerScheduledSanityCheck() {
+        // 1. Accediamo all'executor service (è package-private, quindi visibile dal test)
+        if (bookieStateManager.stateService instanceof java.util.concurrent.ScheduledThreadPoolExecutor) {
+            java.util.concurrent.ScheduledThreadPoolExecutor executor =
+                    (java.util.concurrent.ScheduledThreadPoolExecutor) bookieStateManager.stateService;
+
+            // 2. Prendiamo il task dalla coda (dovrebbe essercene solo 1, quello del sanity check)
+            Runnable scheduledTask = executor.getQueue().peek();
+
+            if (scheduledTask != null) {
+                // 3. Eseguiamo il task manualmente nel thread corrente
+                scheduledTask.run();
+            } else {
+                fail("Non è stato trovato nessun task di Sanity Check schedulato nella coda!");
+            }
+        } else {
+            fail("L'executor service non è del tipo atteso, impossibile estrarre il task.");
+        }
+    }
+
+    /**
+     * MUTANT KILLER: Line 177 (negated conditional) & Line 178 (removed call to set).
+     * Scenario: Bookie in ReadOnly -> Il check deve passare subito a 1 senza chiamare comandi esterni.
+     */
+    @Test
+    public void testSanityCheckInReadOnlyMode() throws Exception {
+        // Setup: Abilitiamo metriche e creiamo mock per catturare il gauge
+        when(mockConf.isSanityCheckMetricsEnabled()).thenReturn(true);
+        StatsLogger mockStats = mock(StatsLogger.class);
+        ArgumentCaptor<Gauge> gaugeCaptor = ArgumentCaptor.forClass(Gauge.class);
+
+        // Inizializzazione SUT
+        bookieStateManager = new BookieStateManager(mockConf, mockStats, mockRm,
+                mockLedgerDirsManager, dummyServiceInfoSupplier);
+
+        // Catturiamo il gauge "SERVER_SANITY" (il secondo registrato)
+        verify(mockStats, times(2)).registerGauge(anyString(), gaugeCaptor.capture());
+        Gauge<Number> sanityGauge = gaugeCaptor.getAllValues().get(1);
+
+        // Verifica stato iniziale (-1)
+        assertEquals("Il valore iniziale deve essere -1", -1, sanityGauge.getSample());
+
+        // AZIONE: Forziamo ReadOnly
+        bookieStateManager.forceToReadOnly();
+
+        // AZIONE CRITICA: Eseguiamo manualmente il task schedulato
+        triggerScheduledSanityCheck();
+
+        // VERIFICA (Uccide mutante riga 178 e 177)
+        // Se riga 178 (set 1) è rimossa -> assert fallisce (resta -1)
+        // Se riga 177 (if ReadOnly) è negata -> prova a eseguire il comando SanityTestCommand (che fallirà o farebbe altro)
+        assertEquals("In ReadOnly mode, sanityPassed deve essere settato a 1", 1, sanityGauge.getSample());
+    }
+
+    /**
+     * MUTANT KILLER: Line 182 (removed call to set 1 on success).
+     * Scenario: Bookie Writable -> SanityTestCommand ritorna successo.
+     * Richiede: Mockito-inline (MockedStatic).
+     */
+    @Test
+    public void testSanityCheckSuccess() throws Exception {
+        when(mockConf.isSanityCheckMetricsEnabled()).thenReturn(true);
+        StatsLogger mockStats = mock(StatsLogger.class);
+        ArgumentCaptor<Gauge> gaugeCaptor = ArgumentCaptor.forClass(Gauge.class);
+
+        // Setup Mock Statico per SanityTestCommand
+        try (org.mockito.MockedStatic<SanityTestCommand> mockedCmd = mockStatic(SanityTestCommand.class)) {
+            // Simuliamo che il comando asincrono completi con successo subito
+            java.util.concurrent.CompletableFuture<Void> successFuture =
+                    java.util.concurrent.CompletableFuture.completedFuture(null);
+
+            mockedCmd.when(() -> SanityTestCommand.handleAsync(any(), any()))
+                    .thenReturn(successFuture);
+
+            // Init SUT
+            bookieStateManager = new BookieStateManager(mockConf, mockStats, mockRm,
+                    mockLedgerDirsManager, dummyServiceInfoSupplier);
+
+            // Cattura Gauge
+            verify(mockStats, times(2)).registerGauge(anyString(), gaugeCaptor.capture());
+            Gauge<Number> sanityGauge = gaugeCaptor.getAllValues().get(1);
+
+            // Assicuriamoci di essere Writable
+            assertFalse(bookieStateManager.isReadOnly());
+
+            // Execute Task
+            triggerScheduledSanityCheck();
+
+            // VERIFICA (Uccide mutante riga 182)
+            // Se la chiamata .set(1) viene rimossa, il valore resta -1
+            assertEquals("Se il comando ha successo, sanityPassed deve essere 1", 1, sanityGauge.getSample());
+        }
+    }
+
+    /**
+     * MUTANT KILLER: Line 184 (removed call to set 0 on failure).
+     * Scenario: Bookie Writable -> SanityTestCommand fallisce (Exception).
+     * Richiede: Mockito-inline (MockedStatic).
+     */
+    @Test
+    public void testSanityCheckFailure() throws Exception {
+        when(mockConf.isSanityCheckMetricsEnabled()).thenReturn(true);
+        StatsLogger mockStats = mock(StatsLogger.class);
+        ArgumentCaptor<Gauge> gaugeCaptor = ArgumentCaptor.forClass(Gauge.class);
+
+        try (org.mockito.MockedStatic<SanityTestCommand> mockedCmd = mockStatic(SanityTestCommand.class)) {
+            // Simuliamo un fallimento asincrono
+            java.util.concurrent.CompletableFuture<Void> failedFuture = new java.util.concurrent.CompletableFuture<>();
+            failedFuture.completeExceptionally(new RuntimeException("Disk Error Simulated"));
+
+            mockedCmd.when(() -> SanityTestCommand.handleAsync(any(), any()))
+                    .thenReturn(failedFuture);
+
+            // Init SUT
+            bookieStateManager = new BookieStateManager(mockConf, mockStats, mockRm,
+                    mockLedgerDirsManager, dummyServiceInfoSupplier);
+
+            // Cattura Gauge
+            verify(mockStats, times(2)).registerGauge(anyString(), gaugeCaptor.capture());
+            Gauge<Number> sanityGauge = gaugeCaptor.getAllValues().get(1);
+
+            // Execute Task
+            triggerScheduledSanityCheck();
+
+            // VERIFICA (Uccide mutante riga 184)
+            // Se la chiamata .set(0) viene rimossa, il valore resta -1 (o 1 se era settato prima)
+            assertEquals("Se il comando fallisce, sanityPassed deve essere 0", 0, sanityGauge.getSample());
+        }
+    }
 }
 
 
