@@ -324,6 +324,7 @@
         <version>1.22.0</version> <configuration>
         <targetClasses>
           <param>org.apache.bookkeeper.bookie.BookieStateManager</param>
+          <param>org.apache.bookkeeper.bookie.BufferedChannel</param>
         </targetClasses>
 
         <targetTests>
