@@ -12,8 +12,6 @@ import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
-
 import static org.junit.Assert.*;
 
 /**
@@ -137,7 +135,7 @@ public class BufferedChannelTest {
         assertEquals(90, bufferedChannel.getNumOfBytesInWriteBuffer());
 
         //  Scrivo nel buffer i dati mancanti
-        int remainingParams = CAPACITY - dataLen; // 10 bytes
+        int remainingParams = CAPACITY - dataLen;
         bufferedChannel.write(generateData(remainingParams));
 
         // La posizione nel buffer deve essere pari a CAPACITY
@@ -604,4 +602,39 @@ public class BufferedChannelTest {
                     e.getMessage().contains("Reading from filechannel returned a non-positive value"));
         }
     }
+
+    /**
+     * TC: killo il mutante che sostiuiva la sottrazione con l addizione.
+     * - scrivo i dati fino a riempire il buffer e poi faccio il flush.
+     * - questo porta writeBufferStartPosition a 100 .
+     * - scrivo nuovi dati che vanno nel buffer e li leggo
+     * Se il mutante somma (pos + startPos) invece di sottrarre:
+     * pos (110 è quella che passo come utente) + start (100) = 210 sarà sbagliato
+     * pos (110) - start (100) = 10 è corretto
+     */
+
+    @Test
+    public void testReadFromWriteBufferWithNonZeroStartPosition() throws IOException {
+        bufferedChannel = new BufferedChannel(allocator, fileChannel, CAPACITY);
+        // riempio il buffer
+        ByteBuf data1 = generateData(CAPACITY);
+        bufferedChannel.write(data1);
+        // eseguo il flush così che il writeBuffer si svuota.
+        // writeBufferStartPosition ora diventa 100.
+        bufferedChannel.flush();
+
+        // scrivo altri 50 byte, questi vanno nel writeBuffer.
+        ByteBuf data2 = generateData(50);
+        bufferedChannel.write(data2);
+
+        // leggo dalla posizione 110 (che è dentro il writeBuffer) una quantità di 10 byte.
+        // writeBufferStartPosition = 100. pos = 110.
+        // positionInBuffer deve essere 10.
+        ByteBuf dest = Unpooled.buffer(10);
+        bufferedChannel.read(dest, 110, 10);
+
+        assertEquals("I bytes leggibili sono 10",10, dest.readableBytes());
+
+    }
+
 }

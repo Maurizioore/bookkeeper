@@ -323,12 +323,14 @@
         <artifactId>pitest-maven</artifactId>
         <version>1.22.0</version> <configuration>
         <targetClasses>
-          <param>org.apache.bookkeeper.bookie.BookieStateManager</param>
+         <!-- <param>org.apache.bookkeeper.bookie.BookieStateManager</param>-->
           <param>org.apache.bookkeeper.bookie.BufferedChannel</param>
         </targetClasses>
 
         <targetTests>
-          <param>org.apache.bookkeeper.bookie.BookieStateManagerTest</param>
+          <!--<param>org.apache.bookkeeper.bookie.BookieStateManagerTest</param>-->
+          <param>org.apache.bookkeeper.bookie.BufferedChannelTest</param>
+          <param>org.apache.bookkeeper.bookie.BufferedChannelMockTest</param>
         </targetTests>
 
         <outputFormats>
