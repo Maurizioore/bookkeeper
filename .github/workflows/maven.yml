@@ -1,0 +1,25 @@
+name: Java CI with Maven
+
+on:
+  push:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Scarico il codice dal repository
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # Imposto l'ambiente Java
+      - name: Set up JDK 8
+        uses: actions/setup-java@v3
+        with:
+          java-version: '8'
+          distribution: 'temurin'
+          cache: maven
+
+      # Compila ed esegue i test, con -B riduco l'output
+      - name: Test with Maven
+        run: mvn -B test --file pom.xml
